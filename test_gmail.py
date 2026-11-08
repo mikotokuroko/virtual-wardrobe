@@ -6,7 +6,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
-from gmail_receipts import SCOPE
+from gmail_receipts import SCOPE, receipt_evidence
 import test_wardrobe
 from wardrobe import create_server
 
@@ -62,15 +62,16 @@ class GmailTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(paired.get("isError"))
         self.assertEqual(self.searches, [])
 
-    async def test_search_groups_orders_and_isolates_owner(self):
+    async def test_search_supplies_receipt_evidence_and_isolates_owner(self):
         await self.connect(True)
         denied = await self.pilot.call("find_gmail_purchases", {}, "bob")
         self.assertTrue(denied["isError"])
         self.assertEqual(self.searches, [])
         result = await self.pilot.call("find_gmail_purchases", {})
-        orders = json.loads(result["content"][0]["text"])["orders"]
-        self.assertEqual(orders, [{"merchant": "shop@example.org", "order": "104",
-                                   "items": ["Green trousers", "Silk scarf"]}])
+        receipts = json.loads(result["content"][0]["text"])["receipts"]
+        self.assertEqual([r["message_id"] for r in receipts], ["m1", "m2"])
+        self.assertEqual(receipts[0]["subject"], "Order #104")
+        self.assertIn("Green trousers", receipts[0]["body_versions"][0])
         wardrobe = await self.pilot.call("list_items", {})
         self.assertEqual(wardrobe["structuredContent"]["result"], [])
 
@@ -84,3 +85,15 @@ class GmailTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await self.pilot.call("find_gmail_purchases", {}))["isError"])
         after = await self.pilot.call("list_items", {})
         self.assertEqual(after["structuredContent"]["result"], [item])
+
+    def test_html_receipt_is_available_when_plain_part_has_no_details(self):
+        from email.message import EmailMessage
+        receipt = EmailMessage()
+        receipt["Subject"] = "Your receipt"
+        receipt.set_content("See receipt below.")
+        receipt.add_alternative("<table><tr><td>Linen top</td></tr><tr><td>39.00 AUD</td></tr>"
+                                "</table><script>tracking()</script>", subtype="html")
+        encoded = base64.urlsafe_b64encode(receipt.as_bytes()).decode()
+        evidence = receipt_evidence(encoded, "sample")
+        self.assertEqual(evidence["body_versions"], ["See receipt below.", "Linen top\n39.00 AUD"])
+        self.assertFalse(evidence["truncated"])

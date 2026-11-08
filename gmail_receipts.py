@@ -1,13 +1,11 @@
 """Optional per-wardrobe Gmail connection and on-demand receipt discovery."""
 import base64
 import hashlib
-import re
 import secrets
 import time
 from contextlib import closing
 from email import policy
 from email.parser import BytesParser
-from email.utils import parseaddr
 from html.parser import HTMLParser
 from urllib.parse import urlencode, urlsplit
 
@@ -18,9 +16,6 @@ SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 MESSAGES = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
 QUERY = 'subject:("order confirmation" OR "order confirmed" OR "your order" OR receipt)'
-ORDER_NUMBER = re.compile(r"\border\s*(?:number|no\.?|#)\s*[:#]?\s*([\w-]+)", re.I)
-PRICE = re.compile(r"\s+(?:[A-Z]{3}\s*|[$£€])\s*\d[\d,.]*(?:\s*[A-Z]{3})?\s*$")
-TOTAL = re.compile(r"^(?:sub\s*total|total|tax|shipping|delivery|discount|payment)\b", re.I)
 
 
 class ReceiptHTML(HTMLParser):
@@ -46,27 +41,28 @@ class ReceiptHTML(HTMLParser):
             self.parts.append(data)
 
 
-def read_order(raw, message_id):
+def receipt_evidence(raw, message_id):
+    """Decode the email for the host model; keep layout cues without executing HTML."""
     message = BytesParser(policy=policy.default).parsebytes(base64.urlsafe_b64decode(raw + "==="))
-    subject = str(message.get("Subject", ""))
-    merchant = parseaddr(str(message.get("From", "")))[1]
-    body = message.get_body(preferencelist=("plain", "html"))
-    text = body.get_content() if body else ""
-    if body and body.get_content_subtype() == "html":
-        parser = ReceiptHTML()
-        parser.feed(text)
-        text = "".join(parser.parts)
-    number = ORDER_NUMBER.search(subject + "\n" + text)
-    items = []
-    for line in text.splitlines():
-        line = " ".join(line.split())
-        price = PRICE.search(line)
-        if price and not TOTAL.match(line):
-            name = line[:price.start()].strip(" -:")
-            if name and len(name) <= 250:
-                items.append(name)
-    return {"merchant": merchant, "order": number.group(1) if number else message_id,
-            "items": items}
+    bodies = []
+    for subtype in ("plain", "html"):
+        part = message.get_body(preferencelist=(subtype,))
+        if part is None:
+            continue
+        text = part.get_content()
+        if subtype == "html":
+            parser = ReceiptHTML()
+            parser.feed(text)
+            parser.close()
+            text = "".join(parser.parts)
+        text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
+        if text and text not in bodies:
+            bodies.append(text)
+    limit = 12000
+    return {"message_id": message_id, "subject": str(message.get("Subject", "")),
+            "sender": str(message.get("From", "")), "email_date": str(message.get("Date", "")),
+            "body_versions": [body[:limit] for body in bodies],
+            "truncated": any(len(body) > limit for body in bodies)}
 
 
 def register_gmail(server, settings, connect, owner, auth_meta, transport):
@@ -173,10 +169,10 @@ def register_gmail(server, settings, connect, owner, auth_meta, transport):
             account = db.execute("SELECT token FROM gmail_accounts WHERE owner=?", (user,)).fetchone()
         if not account:
             raise ValueError("Connect your Gmail account to search receipts.")
-        params = {"q": QUERY, "maxResults": 10}
+        params = {"q": QUERY, "maxResults": 3}
         if page_token:
             params["pageToken"] = page_token
-        orders = {}
+        receipts = []
         try:
             async with httpx.AsyncClient(transport=transport, headers={
                     "Authorization": "Bearer " + account["token"]}) as client:
@@ -186,13 +182,7 @@ def register_gmail(server, settings, connect, owner, auth_meta, transport):
                 for ref in page.get("messages", []):
                     result = await client.get(MESSAGES + "/" + ref["id"], params={"format": "raw"})
                     result.raise_for_status()
-                    order = read_order(result.json()["raw"], ref["id"])
-                    key = (order["merchant"], order["order"])
-                    if key in orders:
-                        prior = orders[key]["items"]
-                        prior.extend(item for item in order["items"] if item not in prior)
-                    else:
-                        orders[key] = order
+                    receipts.append(receipt_evidence(result.json()["raw"], ref["id"]))
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 401:
                 with closing(connect()) as db, db:
@@ -201,4 +191,4 @@ def register_gmail(server, settings, connect, owner, auth_meta, transport):
             raise ValueError("Gmail search failed. Try again later.") from None
         except (httpx.RequestError, KeyError, ValueError):
             raise ValueError("Could not read the receipts. Try again later.") from None
-        return {"orders": list(orders.values()), "next_page_token": page.get("nextPageToken")}
+        return {"receipts": receipts, "next_page_token": page.get("nextPageToken")}

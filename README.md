@@ -39,4 +39,4 @@ Enable the Gmail API for a Google Cloud project. Configure a web OAuth client wi
 
 Ask to connect Gmail, open the private link, select the account, and grant read-only Gmail access. Paste the pairing code from the browser into the same wardrobe chat. The plugin stores the short-lived access token in the private pilot database. Reconnect when the token expires.
 
-Ask to find purchases to search ten matching receipt messages at a time. Request the next page to continue. The pilot recognises plain-text and HTML item lines ending in a price. Receipts with an unfamiliar layout appear for review with an empty item list. Search results do not create wardrobe items.
+Ask to find purchases to search three receipt messages per page. The receipt-reading skill gives ChatGPT the subject, sender, email date and decoded body text, including visible HTML table contents. ChatGPT identifies the items and groups them by order for review. Each body version is limited to 12,000 characters and the tool flags truncation. Attachments are outside this search. Search results do not create wardrobe items.
