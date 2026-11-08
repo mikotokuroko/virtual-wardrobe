@@ -46,3 +46,34 @@ class ReceiptReviewTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await self.choice("linen", False))["kept"])
         tools = (await self.pilot.rpc("tools/list", {})).json()["result"]["tools"]
         self.assertFalse(any("gmail" in tool["name"] for tool in tools))
+
+    async def test_identify_receipt_item_before_styling(self):
+        trousers = await self.choice("trousers", True, description="Black wide-leg trousers", category="bottom")
+        outfit = await self.pilot.call("show_outfit", {"item_ids": [trousers["item_id"]]})
+        self.assertEqual(json.loads(outfit["content"][0]["text"])["description"], "Black wide-leg trousers")
+        for method in ("correct_item", "save_photo"):
+            line = "4102-" + method
+            item = await self.choice(line, True, description="Style 4102")
+            item_id = item["item_id"]
+            args = {"item_ids": [item_id]}
+            pending = await self.pilot.call("show_outfit", args)
+            self.assertTrue(pending["isError"])
+            self.assertIn("description or photo", pending["content"][0]["text"])
+            details = {"description": "Linen shirt", "category": "top", "colour": "blue"}
+            if method == "save_photo":
+                details.update(existing_item_id=item_id, photo=self.pilot.file)
+                denied = await self.pilot.call(method, details, "bob")
+                self.assertTrue(denied["isError"])
+            else:
+                details.update(item_id=item_id)
+            changed = await self.pilot.call(method, details)
+            self.assertFalse(changed.get("isError"), changed)
+            if method == "save_photo":
+                replay = await self.pilot.call(method, details)
+                self.assertFalse(replay.get("isError"), replay)
+            shown = await self.pilot.call("show_outfit", args)
+            self.assertEqual(json.loads(shown["content"][0]["text"])["description"], "Linen shirt")
+            self.assertEqual(len(shown["content"]), 2 if method == "save_photo" else 1)
+            self.assertEqual(await self.choice(line, True), item)
+        listed = await self.pilot.call("list_items", {})
+        self.assertEqual(len(listed["structuredContent"]["result"]), 3)

@@ -154,38 +154,66 @@ def create_server(settings, transport=None):
     auth_meta = {"securitySchemes": [{"type": "oauth2", "scopes": ["wardrobe"]}]}
 
     @server.tool(meta={**auth_meta, "openai/fileParams": ["photo"]})
-    async def save_photo(photo: Upload, category: Category, colour: Label, description: Label) -> dict:
-        """Save one attached garment photo after the owner confirms the suggested details."""
+    async def save_photo(photo: Upload, category: Category, colour: Label, description: Label,
+                         existing_item_id: str | None = None) -> dict:
+        """Save a confirmed garment photo. Pass existing_item_id when identifying a saved receipt item."""
         user = owner()
         with closing(connect()) as db:
             existing = db.execute(f"SELECT {fields} FROM items WHERE owner=? AND source=?",
                                   (user, photo["file_id"])).fetchone()
+            if existing_item_id is not None:
+                target = db.execute("SELECT 1 FROM items WHERE owner=? AND id=?",
+                                    (user, existing_item_id)).fetchone()
+                if target is None:
+                    raise ValueError("Wardrobe item unavailable.")
         if existing:
+            if existing_item_id is not None and existing["id"] != existing_item_id:
+                raise ValueError("This photo already belongs to another wardrobe item.")
             return dict(existing)
         try:
             data, mime = await download_photo(photo["download_url"], settings.photo_hosts, transport)
         except httpx.RequestError:
             raise ValueError("Photo download failed. Try uploading the photo again.") from None
         with closing(connect()) as db, db:
+            if existing_item_id is not None:
+                try:
+                    row = db.execute(f"""UPDATE items SET source=?, category=?, colour=?, description=?,
+                                       photo=?, mime=? WHERE owner=? AND id=? AND length(photo)=0
+                                       RETURNING {fields}""",
+                                     (photo["file_id"], category, colour, description, data, mime,
+                                      user, existing_item_id)).fetchone()
+                except sqlite3.IntegrityError:
+                    raise ValueError("This photo already belongs to another wardrobe item.") from None
+                if row is None:
+                    row = db.execute(f"SELECT {fields} FROM items WHERE owner=? AND id=? AND source=?",
+                                     (user, existing_item_id, photo["file_id"])).fetchone()
+                if row is None:
+                    raise ValueError("This wardrobe item already has a photo.")
+                return dict(row)
             db.execute("""INSERT INTO items VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(owner, source) DO NOTHING""",
                        (str(uuid4()), user, photo["file_id"], category, colour, description, data, mime))
             return dict(db.execute(f"SELECT {fields} FROM items WHERE owner=? AND source=?",
                                    (user, photo["file_id"])).fetchone())
 
-    @server.tool(meta=auth_meta)
-    def show_item(item_id: str) -> list[types.TextContent | types.ImageContent]:
-        """Show the owner's recorded details and original photo."""
+    def item_content(item_id: str, for_outfit: bool) -> list[types.TextContent | types.ImageContent]:
         with closing(connect()) as db:
             row = db.execute(f"SELECT {fields}, photo, mime FROM items WHERE owner=? AND id=?",
                              (owner(), item_id)).fetchone()
         if row is None:
             raise ValueError("Wardrobe item unavailable.")
+        if for_outfit and row["category"] == "unknown":
+            raise ValueError(f"Please identify {row['description']} with a short description or photo before styling it.")
         content = [types.TextContent(type="text", text=json.dumps({k: row[k] for k in fields.split(", ")}))]
         if row["photo"]:
             content.append(types.ImageContent(type="image", mimeType=row["mime"],
                                               data=base64.b64encode(row["photo"]).decode()))
         return content
+
+    @server.tool(meta=auth_meta)
+    def show_item(item_id: str) -> list[types.TextContent | types.ImageContent]:
+        """Show the owner's recorded details and any available photo."""
+        return item_content(item_id, for_outfit=False)
 
     @server.tool(meta=auth_meta, annotations=types.ToolAnnotations(readOnlyHint=True))
     def reviewed_receipt_lines(merchant: Label, receipt_ref: Label) -> list[dict]:
@@ -232,7 +260,7 @@ def create_server(settings, transport=None):
             raise ValueError("Choose each wardrobe item only once.")
         content = []
         for item_id in item_ids:
-            content.extend(show_item(item_id))
+            content.extend(item_content(item_id, for_outfit=True))
         if missing_piece:
             content.append(types.TextContent(type="text", text=(
                 f"This is a partial outfit. What do you own that could work for {missing_piece}?"
