@@ -107,7 +107,14 @@ def create_server(settings, transport=None):
             raise ValueError("Use HTTPS for OAuth endpoints.")
     server = FastMCP("Virtual wardrobe", stateless_http=True, json_response=True,
                      transport_security=TransportSecuritySettings(allowed_hosts=[urlsplit(settings.resource).netloc]),
-                     instructions="Inspect each attached garment photo, suggest its colour, category and description, and ask the tester to confirm or correct before saving.",
+                     instructions=(
+                         "Inspect each attached garment photo, suggest its colour, category and "
+                         "description, and ask the tester to confirm or correct before saving. "
+                         "For an outfit request, call list_items. Choose complementary pieces "
+                         "from those results for the requested occasion, including any piece "
+                         "the tester asked to wear. Call show_outfit with the selected IDs in "
+                         "display order. Describe the combination and why it suits the occasion."
+                     ),
                      token_verifier=Verifier(settings, transport),
                      auth=AuthSettings(issuer_url=AnyHttpUrl(settings.issuer),
                                        resource_server_url=AnyHttpUrl(settings.resource),
@@ -160,6 +167,18 @@ def create_server(settings, transport=None):
         return [types.TextContent(type="text", text=json.dumps({k: row[k] for k in fields.split(", ")})),
                 types.ImageContent(type="image", mimeType=row["mime"],
                                    data=base64.b64encode(row["photo"]).decode())]
+
+    @server.tool(meta=auth_meta, annotations=types.ToolAnnotations(readOnlyHint=True))
+    def show_outfit(
+        item_ids: Annotated[list[str], Field(min_length=1, max_length=8)],
+    ) -> list[types.TextContent | types.ImageContent]:
+        """Display the selected wardrobe items together, pairing each description with its photo."""
+        if len(set(item_ids)) != len(item_ids):
+            raise ValueError("Choose each wardrobe item only once.")
+        content = []
+        for item_id in item_ids:
+            content.extend(show_item(item_id))
+        return content
 
     @server.tool(meta=auth_meta)
     def list_items() -> list[dict]:

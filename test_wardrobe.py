@@ -78,3 +78,26 @@ class WardrobeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unchanged["structuredContent"]["result"], [item])
         denied = await self.rpc("tools/list", {}, "uninvited")
         self.assertEqual(denied.status_code, 401)
+
+    async def test_show_selected_outfit(self):
+        items = []
+        for category, colour, description in [
+            ("bottom", "green", "trousers"), ("top", "white", "linen shirt"),
+            ("top", "blue", "tee"), ("accessory", "grey", "scarf"),
+        ]:
+            photo = {**self.file, "file_id": description}
+            saved = await self.call("save_photo", {"photo": photo, "category": category,
+                                    "colour": colour, "description": description})
+            items.append(json.loads(saved["content"][0]["text"]))
+        selected = [items[i] for i in (0, 1, 3)]
+        ids = [item["id"] for item in selected]
+        outfit = await self.call("show_outfit", {"item_ids": ids})
+        self.assertFalse(outfit.get("isError"))
+        blocks = outfit["content"]
+        self.assertEqual([json.loads(block["text"]) for block in blocks[::2]], selected)
+        self.assertEqual([base64.b64decode(block["data"]) for block in blocks[1::2]], [PNG] * 3)
+        foreign = await self.call("save_photo", {"photo": self.file, **self.details}, "bob")
+        ids.append(json.loads(foreign["content"][0]["text"])["id"])
+        denied = await self.call("show_outfit", {"item_ids": ids})
+        self.assertTrue(denied["isError"])
+        self.assertFalse(any(block["type"] == "image" for block in denied["content"]))
