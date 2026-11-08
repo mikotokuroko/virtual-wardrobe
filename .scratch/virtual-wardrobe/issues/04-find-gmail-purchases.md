@@ -10,3 +10,7 @@
 - [ ] Show detected purchases grouped by order. Discovery alone leaves wardrobe contents unchanged.
 - [ ] Verify another tester cannot view the results or search the first tester’s mailbox.
 - [ ] After declined access or a failed search, verify the tester can still use the existing wardrobe.
+
+## Comments
+
+Implemented optional read-only Gmail consent, browser-to-wardrobe pairing and explicit paginated receipt search. Local MCP tests with simulated Google endpoints cover grouped results, cross-owner isolation, declined consent and search failure. Live Gmail consent and merchant receipt recognition remain to be checked with a configured pilot OAuth client.

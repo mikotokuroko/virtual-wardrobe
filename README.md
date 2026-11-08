@@ -32,3 +32,11 @@ Set the following variables in the server environment, then run `python wardrobe
 Configure the provider to issue user tokens with the wardrobe scope, resource audience and stable subject. Connect the MCP URL in ChatGPT using the provider's ChatGPT client registration. No Gmail connection is needed.
 
 For the live acceptance check, attach a JPEG, PNG or WebP garment photo (up to 5 MiB). Ask to add it, review the suggested colour and category, then confirm or correct them. Open a fresh chat and ask to see the saved piece. Sign in as a second tester and verify they cannot retrieve or change the first tester’s item.
+
+## Optional Gmail receipt search
+
+Enable the Gmail API for a Google Cloud project. Configure a web OAuth client with the exact redirect URI `https://<wardrobe-host>/gmail/callback`, add the pilot testers to the consent screen, and set `GMAIL_CLIENT_ID` and `GMAIL_CLIENT_SECRET` on the server. Route both /gmail/connect and /gmail/callback through the same HTTPS proxy. Exclude query strings from access logs on those routes.
+
+Ask to connect Gmail, open the private link, select the account, and grant read-only Gmail access. Paste the pairing code from the browser into the same wardrobe chat. The plugin stores the short-lived access token in the private pilot database. Reconnect when the token expires.
+
+Ask to find purchases to search ten matching receipt messages at a time. Request the next page to continue. The pilot recognises plain-text and HTML item lines ending in a price. Receipts with an unfamiliar layout appear for review with an empty item list. Search results do not create wardrobe items.
