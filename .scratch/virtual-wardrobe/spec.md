@@ -8,7 +8,7 @@ When I ask what to wear, I want an answer I can act on with clothes I own. Some 
 
 ## Solution
 
-Give each invited tester a private wardrobe in ChatGPT. In their first chat, they can upload photos, describe an occasion and see an outfit assembled from their pieces. Later, they can ask the plugin to search Gmail, review purchases by order and add the pieces they kept.
+Give each invited tester a private wardrobe in ChatGPT. In their first chat, they can upload photos, describe an occasion and see an outfit assembled from their pieces. Later, they can ask ChatGPT to search their connected Gmail or Apple Mail plugin, review purchases by order and add the pieces they kept.
 
 ## User Stories
 
@@ -32,10 +32,10 @@ Give each invited tester a private wardrobe in ChatGPT. In their first chat, the
 
 ## Implementation Decisions
 
-- Use a ChatGPT plugin with durable per-owner storage. Scope wardrobe reads, writes, photos, Gmail authorisation and import decisions to the authenticated owner.
+- Use a ChatGPT plugin with durable per-owner storage. Scope wardrobe reads, writes, photos and import decisions to the authenticated owner.
 - Accept photos independently of email. Use the owner’s corrections when identifying and styling a wardrobe item.
 - Keep receipt discovery separate from adding items. Present detected purchases by order and persist each review decision. Confirming a kept piece and recording its import must produce a single wardrobe item even if the request is retried.
-- Search Gmail on explicit request using read-only access. A declined connection or failed search must leave the existing wardrobe usable.
+- On explicit request, use the host’s connected Gmail or Apple Mail plugin to read receipts. The wardrobe service handles only purchase review and storage. A declined connection or failed search must leave the existing wardrobe usable.
 - Select identifiable wardrobe items for outfits. Honour requested pieces and swaps, show available photos and use descriptions for text-only items. Ask for identifying details before styling a piece known only by a product code.
 
 ## Testing Decisions
@@ -49,7 +49,7 @@ Give each invited tester a private wardrobe in ChatGPT. In their first chat, the
 
 ## Out of Scope
 
-A standalone website, public rollout, providers beyond Gmail, background inbox monitoring and unsolicited shopping suggestions are outside the pilot.
+A standalone website, public rollout, custom mail-provider integrations, background inbox monitoring and unsolicited shopping suggestions are outside the pilot.
 
 ## Further Notes
 

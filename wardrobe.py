@@ -10,8 +10,6 @@ from typing import Annotated, Literal, NotRequired
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from gmail_receipts import register_gmail
-
 import httpx
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp import types
@@ -33,8 +31,6 @@ class Settings:
     secret: str
     invited: set[str]
     photo_hosts: set[str]
-    gmail_client: str = ""
-    gmail_secret: str = ""
 
 
 @with_config(ConfigDict(extra="forbid"))
@@ -147,6 +143,13 @@ def create_server(settings, transport=None):
             category TEXT NOT NULL, colour TEXT NOT NULL, description TEXT NOT NULL,
             photo BLOB NOT NULL, mime TEXT NOT NULL, UNIQUE(owner, source))""")
 
+        db.execute("""CREATE TABLE IF NOT EXISTS receipt_decisions (
+            owner TEXT NOT NULL, merchant TEXT NOT NULL, receipt TEXT NOT NULL,
+            line TEXT NOT NULL, item_id TEXT, PRIMARY KEY(owner, merchant, receipt, line))""")
+        # Retire credentials issued by the previous direct Gmail integration.
+        for table in ("gmail_links", "gmail_pairing", "gmail_accounts"):
+            db.execute(f"DROP TABLE IF EXISTS {table}")
+
     fields = "id, category, colour, description"
     auth_meta = {"securitySchemes": [{"type": "oauth2", "scopes": ["wardrobe"]}]}
 
@@ -178,9 +181,47 @@ def create_server(settings, transport=None):
                              (owner(), item_id)).fetchone()
         if row is None:
             raise ValueError("Wardrobe item unavailable.")
-        return [types.TextContent(type="text", text=json.dumps({k: row[k] for k in fields.split(", ")})),
-                types.ImageContent(type="image", mimeType=row["mime"],
-                                   data=base64.b64encode(row["photo"]).decode())]
+        content = [types.TextContent(type="text", text=json.dumps({k: row[k] for k in fields.split(", ")}))]
+        if row["photo"]:
+            content.append(types.ImageContent(type="image", mimeType=row["mime"],
+                                              data=base64.b64encode(row["photo"]).decode()))
+        return content
+
+    @server.tool(meta=auth_meta, annotations=types.ToolAnnotations(readOnlyHint=True))
+    def reviewed_receipt_lines(merchant: Label, receipt_ref: Label) -> list[dict]:
+        """Look up settled line references before presenting an order for review."""
+        with closing(connect()) as db:
+            rows = db.execute("""SELECT line, item_id FROM receipt_decisions
+                              WHERE owner=? AND merchant=? AND receipt=? ORDER BY line""",
+                              (owner(), merchant.strip().casefold(), receipt_ref.strip().casefold()))
+            return [{"line_ref": row["line"], "kept": row["item_id"] is not None,
+                     "item_id": row["item_id"]} for row in rows]
+
+    @server.tool(meta=auth_meta)
+    def record_receipt_choice(merchant: Label, receipt_ref: Label, line_ref: Label,
+                              kept: bool, description: Label | None = None,
+                              category: Category | None = None, colour: Label | None = None) -> dict:
+        """Record an explicit keep or skip for one receipt unit. Replays return its original decision."""
+        user = owner()
+        key = (user, merchant.strip().casefold(), receipt_ref.strip().casefold(), line_ref.strip().casefold())
+        with closing(connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute("""SELECT item_id FROM receipt_decisions
+                                  WHERE owner=? AND merchant=? AND receipt=? AND line=?""", key).fetchone()
+            if existing:
+                item_id = existing["item_id"]
+            else:
+                item_id = None
+                if kept:
+                    if not description:
+                        raise ValueError("Provide the confirmed piece's description.")
+                    item_id = str(uuid4())
+                    db.execute("""INSERT INTO items (id, owner, source, category, colour, description, photo, mime)
+                               VALUES (?, ?, ?, ?, ?, ?, X'', '')""",
+                               (item_id, user, "receipt:" + item_id, category or "unknown",
+                                colour or "unknown", description))
+                db.execute("INSERT INTO receipt_decisions VALUES (?, ?, ?, ?, ?)", (*key, item_id))
+        return {"line_ref": key[-1], "kept": item_id is not None, "item_id": item_id}
 
     @server.tool(meta=auth_meta, annotations=types.ToolAnnotations(readOnlyHint=True))
     def show_outfit(
@@ -232,7 +273,6 @@ def create_server(settings, transport=None):
                 raise ValueError("Wardrobe item unavailable.")
             return dict(row)
 
-    register_gmail(server, settings, connect, owner, auth_meta, transport)
     return server
 
 
@@ -250,6 +290,5 @@ if __name__ == "__main__":
                         env["WARDROBE_RESOURCE"], env["WARDROBE_ISSUER"],
                         env["WARDROBE_INTROSPECTION"], env["WARDROBE_CLIENT"],
                         env["WARDROBE_SECRET"], values("WARDROBE_INVITED"),
-                        values("WARDROBE_PHOTO_HOSTS"), env.get("GMAIL_CLIENT_ID", ""),
-                        env.get("GMAIL_CLIENT_SECRET", ""))
+                        values("WARDROBE_PHOTO_HOSTS"))
     create_server(settings).run(transport="streamable-http")

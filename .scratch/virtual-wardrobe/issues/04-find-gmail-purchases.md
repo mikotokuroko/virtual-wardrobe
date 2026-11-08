@@ -14,3 +14,5 @@
 ## Comments
 
 Implemented optional read-only Gmail consent, browser-to-wardrobe pairing and explicit paginated receipt search. Local MCP tests with simulated Google endpoints cover grouped results, cross-owner isolation, declined consent and search failure. Live Gmail consent and merchant receipt recognition remain to be checked with a configured pilot OAuth client.
+
+The revised pilot delegates mailbox access to the host’s connected Gmail or Apple Mail plugin. The wardrobe’s direct Google OAuth and search tools have been retired.

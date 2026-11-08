@@ -33,10 +33,15 @@ Configure the provider to issue user tokens with the wardrobe scope, resource au
 
 For the live acceptance check, attach a JPEG, PNG or WebP garment photo (up to 5 MiB). Ask to add it, review the suggested colour and category, then confirm or correct them. Open a fresh chat and ask to see the saved piece. Sign in as a second tester and verify they cannot retrieve or change the first tester’s item.
 
-## Optional Gmail receipt search
+## Receipt review with connected mail plugins
 
-Enable the Gmail API for a Google Cloud project. Configure a web OAuth client with the exact redirect URI `https://<wardrobe-host>/gmail/callback`, add the pilot testers to the consent screen, and set `GMAIL_CLIENT_ID` and `GMAIL_CLIENT_SECRET` on the server. Route both /gmail/connect and /gmail/callback through the same HTTPS proxy. Exclude query strings from access logs on those routes.
+Enable the wardrobe and the desired mail plugin in the same conversation. Ask, for example,
+“Use Gmail to find my clothing receipts in the ads account.” Apple Mail can serve the same
+role wherever the host offers that connector. Each mail plugin manages its own mailbox
+permissions. The wardrobe still uses its own sign-in for private storage.
 
-Ask to connect Gmail, open the private link, select the account, and grant read-only Gmail access. Paste the pairing code from the browser into the same wardrobe chat. The plugin stores the short-lived access token in the private pilot database. Reconnect when the token expires.
-
-Ask to find purchases to search three receipt messages per page. The receipt-reading skill gives ChatGPT the subject, sender, email date and decoded body text, including visible HTML table contents. ChatGPT identifies the items and groups them by order for review. Each body version is limited to 12,000 characters and the tool flags truncation. Attachments are outside this search. Search results do not create wardrobe items.
+ChatGPT reads the receipt, shows the pieces by order, and records the owner's keep or skip
+choices. Repeating a settled choice returns the original result. Text-only pieces are
+available across chats. Only confirmed item details and receipt review keys go to the
+wardrobe server. Existing photo wardrobes are preserved when upgrading, and obsolete
+local Gmail connection records are removed on startup.
