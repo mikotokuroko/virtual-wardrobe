@@ -79,7 +79,7 @@ class WardrobeTest(unittest.IsolatedAsyncioTestCase):
         denied = await self.rpc("tools/list", {}, "uninvited")
         self.assertEqual(denied.status_code, 401)
 
-    async def test_show_selected_outfit(self):
+    async def save_sample_wardrobe(self):
         items = []
         for category, colour, description in [
             ("bottom", "green", "trousers"), ("top", "white", "linen shirt"),
@@ -89,6 +89,10 @@ class WardrobeTest(unittest.IsolatedAsyncioTestCase):
             saved = await self.call("save_photo", {"photo": photo, "category": category,
                                     "colour": colour, "description": description})
             items.append(json.loads(saved["content"][0]["text"]))
+        return items
+
+    async def test_show_selected_outfit(self):
+        items = await self.save_sample_wardrobe()
         selected = [items[i] for i in (0, 1, 3)]
         ids = [item["id"] for item in selected]
         outfit = await self.call("show_outfit", {"item_ids": ids})
@@ -101,3 +105,26 @@ class WardrobeTest(unittest.IsolatedAsyncioTestCase):
         denied = await self.call("show_outfit", {"item_ids": ids})
         self.assertTrue(denied["isError"])
         self.assertFalse(any(block["type"] == "image" for block in denied["content"]))
+
+    async def test_swap_keeps_trousers_and_scarf(self):
+        trousers, shirt, tee, scarf = await self.save_sample_wardrobe()
+        args = {"item_ids": [piece["id"] for piece in (trousers, shirt, scarf)],
+                "replace_id": shirt["id"], "replacement_id": tee["id"]}
+        result = await self.call("swap_outfit_item", args)
+        self.assertEqual([json.loads(block["text"]) for block in result["content"][::2]],
+                         [trousers, tee, scarf])
+        other = await self.call("save_photo", {"photo": self.file, **self.details}, "bob")
+        args["replacement_id"] = json.loads(other["content"][0]["text"])["id"]
+        refused = await self.call("swap_outfit_item", args)
+        self.assertTrue(refused["isError"])
+        self.assertFalse(any(block["type"] == "image" for block in refused["content"]))
+
+    async def test_missing_piece_returns_partial_outfit_and_question(self):
+        trousers, *_ = await self.save_sample_wardrobe()
+        result = await self.call("show_outfit", {"item_ids": [trousers["id"]],
+                                                 "missing_piece": "formal shoes"})
+        details, photo, question = result["content"]
+        self.assertEqual(json.loads(details["text"]), trousers)
+        self.assertEqual(photo["type"], "image")
+        self.assertIn("What do you own", question["text"])
+        self.assertIn("formal shoes", question["text"])

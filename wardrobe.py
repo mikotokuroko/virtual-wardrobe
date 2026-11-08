@@ -43,6 +43,7 @@ class Upload(TypedDict):
 
 Category = Literal["top", "bottom", "accessory"]
 Label = Annotated[str, Field(min_length=1, max_length=300, pattern=r"\S")]
+OutfitIDs = Annotated[list[str], Field(min_length=1, max_length=8)]
 MAX_BYTES = 5 * 1024 * 1024
 
 
@@ -113,7 +114,13 @@ def create_server(settings, transport=None):
                          "For an outfit request, call list_items. Choose complementary pieces "
                          "from those results for the requested occasion, including any piece "
                          "the tester asked to wear. Call show_outfit with the selected IDs in "
-                         "display order. Describe the combination and why it suits the occasion."
+                         "display order. Describe the combination and why it suits the occasion. "
+                         "For a swap, use swap_outfit_item with the last shown outfit, the piece "
+                         "to replace and a suitable alternative from list_items. Preserve the "
+                         "occasion and all other pieces. If the requested piece is missing, "
+                         "show the suitable owned pieces with show_outfit and pass missing_piece "
+                         "to ask what else the tester owns. If none fit, ask directly. "
+                         "Only suggest shopping when the tester explicitly requests it."
                      ),
                      token_verifier=Verifier(settings, transport),
                      auth=AuthSettings(issuer_url=AnyHttpUrl(settings.issuer),
@@ -170,7 +177,7 @@ def create_server(settings, transport=None):
 
     @server.tool(meta=auth_meta, annotations=types.ToolAnnotations(readOnlyHint=True))
     def show_outfit(
-        item_ids: Annotated[list[str], Field(min_length=1, max_length=8)],
+        item_ids: OutfitIDs, missing_piece: Label | None = None,
     ) -> list[types.TextContent | types.ImageContent]:
         """Display the selected wardrobe items together, pairing each description with its photo."""
         if len(set(item_ids)) != len(item_ids):
@@ -178,7 +185,25 @@ def create_server(settings, transport=None):
         content = []
         for item_id in item_ids:
             content.extend(show_item(item_id))
+        if missing_piece:
+            content.append(types.TextContent(type="text", text=(
+                f"This is a partial outfit. What do you own that could work for {missing_piece}?"
+            )))
         return content
+
+    @server.tool(meta=auth_meta, annotations=types.ToolAnnotations(readOnlyHint=True))
+    def swap_outfit_item(
+        item_ids: OutfitIDs, replace_id: str, replacement_id: str,
+    ) -> list[types.TextContent | types.ImageContent]:
+        """Redisplay the last outfit with exactly one piece replaced, preserving order."""
+        if item_ids.count(replace_id) != 1 or replacement_id in item_ids:
+            raise ValueError("Select one current piece and a different wardrobe item.")
+        with closing(connect()) as db:
+            existing = db.execute("SELECT 1 FROM items WHERE owner=? AND id=?",
+                                  (owner(), replace_id)).fetchone()
+        if existing is None:
+            raise ValueError("Wardrobe item unavailable.")
+        return show_outfit([replacement_id if item == replace_id else item for item in item_ids])
 
     @server.tool(meta=auth_meta)
     def list_items() -> list[dict]:
