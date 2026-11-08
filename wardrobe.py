@@ -111,19 +111,11 @@ def create_server(settings, transport=None):
                      instructions=(
                          "Inspect each attached garment photo, suggest its colour, category and "
                          "description, and ask the tester to confirm or correct before saving. "
-                         "For an outfit request, call list_items. Choose complementary pieces "
-                         "from those results for the requested occasion, including any piece "
-                         "the tester asked to wear. Call show_outfit with the selected IDs in "
-                         "display order. Describe the combination and why it suits the occasion. "
-                         "For a swap, use swap_outfit_item with the last shown outfit, the piece "
-                         "to replace and a suitable alternative from list_items. Preserve the "
-                         "occasion and all other pieces. If the requested piece is missing, "
-                         "show the suitable owned pieces with show_outfit and pass missing_piece "
-                         "to ask what else the tester owns. If none fit, ask directly. "
-                         "Only suggest shopping when the tester explicitly requests it. "
-                         + Path(__file__).with_name("skills").joinpath(
-                             "read-wardrobe-receipts", "SKILL.md"
-                         ).read_text(encoding="utf-8").split("---", 2)[2].strip()
+                         + "\n\n".join(
+                             (Path(__file__).with_name("skills") / name / "SKILL.md")
+                             .read_text(encoding="utf-8").split("---", 2)[2].strip()
+                             for name in ("style-wardrobe-outfit", "read-wardrobe-receipts")
+                         )
                      ),
                      token_verifier=Verifier(settings, transport),
                      auth=AuthSettings(issuer_url=AnyHttpUrl(settings.issuer),
