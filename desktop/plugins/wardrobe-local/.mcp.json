@@ -1,0 +1,1 @@
+{"wardrobe-local":{"command":"/bin/sh","args":["-c","exec \"$HOME/.local/share/wardrobe-pilot/venv/bin/python\" \"$HOME/.local/share/wardrobe-pilot/wardrobe_local.py\""]}}

@@ -1,0 +1,1 @@
+{"name":"wardrobe-pilot","plugins":[{"name":"wardrobe-local","source":{"source":"local","path":"./plugins/wardrobe-local"},"policy":{"installation":"AVAILABLE","authentication":"ON_INSTALL"},"category":"Lifestyle"}]}

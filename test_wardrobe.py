@@ -46,6 +46,21 @@ class WardrobeTest(unittest.IsolatedAsyncioTestCase):
         response.raise_for_status()
         return response.json()["result"]
 
+    async def test_anonymous_discovery_keeps_inventory_private(self):
+        app = create_server(self.settings, self.external).streamable_http_app()
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                         base_url="https://wardrobe.example") as client:
+                async def post(method, params):
+                    return await client.post("/mcp", json={"jsonrpc": "2.0", "id": 1,
+                                                           "method": method, "params": params})
+                init = await post("initialize", {"protocolVersion": "2025-03-26"})
+                self.assertEqual(init.json()["result"]["protocolVersion"], "2025-03-26")
+                listing = await post("tools/list", {})
+                self.assertIn("show_outfit", [t["name"] for t in listing.json()["result"]["tools"]])
+                denied = await post("tools/call", {"name": "list_items", "arguments": {}})
+                self.assertEqual(denied.status_code, 401)
+
     async def test_save_then_retrieve(self):
         listing = (await self.rpc("tools/list", {})).json()["result"]["tools"]
         tool = next(t for t in listing if t["name"] == "save_photo")

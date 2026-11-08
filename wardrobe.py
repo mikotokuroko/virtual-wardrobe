@@ -13,12 +13,15 @@ from uuid import uuid4
 import httpx
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp import types
+from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 from pydantic import AnyHttpUrl, ConfigDict, Field, with_config
 from typing_extensions import TypedDict
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse, Response
 
 
 @dataclass(frozen=True)
@@ -102,13 +105,55 @@ async def download_photo(url, hosts, transport):
     raise ValueError("Choose a PNG, JPEG or WebP photo.")
 
 
-def create_server(settings, transport=None):
-    for url in (settings.resource, settings.issuer, settings.introspection):
-        if not url.startswith("https://"):
-            raise ValueError("Use HTTPS for OAuth endpoints.")
-    server = FastMCP("Virtual wardrobe", stateless_http=True, json_response=True,
-                     transport_security=TransportSecuritySettings(allowed_hosts=[urlsplit(settings.resource).netloc]),
-                     instructions=(
+class DiscoveryMiddleware(BaseHTTPMiddleware):
+    """Publish the tool catalogue while leaving all execution to the OAuth middleware."""
+
+    def __init__(self, app, server):
+        super().__init__(app)
+        self.server = server
+
+    async def dispatch(self, request, call_next):
+        if (request.url.path != "/mcp" or request.method != "POST"
+                or "authorization" in request.headers):
+            return await call_next(request)
+        length = request.headers.get("content-length", "")
+        if not length.isdigit() or len(length) > 5 or int(length) > 16384:
+            return await call_next(request)
+        try:
+            message = await request.json()
+        except (ValueError, UnicodeError):
+            return await call_next(request)
+        if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
+            return await call_next(request)
+        method = message.get("method")
+        if method == "initialize":
+            options = self.server._mcp_server.create_initialization_options()
+            params = message.get("params")
+            requested = params.get("protocolVersion") if isinstance(params, dict) else None
+            version = requested if requested in SUPPORTED_PROTOCOL_VERSIONS else types.LATEST_PROTOCOL_VERSION
+            result = types.InitializeResult(protocolVersion=version,
+                capabilities=options.capabilities, serverInfo=types.Implementation(
+                    name=options.server_name, version=options.server_version),
+                instructions=options.instructions).model_dump(mode="json", exclude_none=True, by_alias=True)
+        elif method == "tools/list":
+            result = {"tools": [tool.model_dump(mode="json", by_alias=True, exclude_none=True)
+                                for tool in await self.server.list_tools()]}
+        elif method == "notifications/initialized":
+            return Response(status_code=202)
+        else:
+            return await call_next(request)
+        return JSONResponse({"jsonrpc": "2.0", "id": message.get("id"), "result": result})
+
+
+class WardrobeServer(FastMCP):
+    def streamable_http_app(self):
+        app = super().streamable_http_app()
+        app.add_middleware(DiscoveryMiddleware, server=self)
+        return app
+
+
+def styling_instructions():
+    return (
                          "Inspect each attached garment photo, suggest its colour, category and "
                          "description, and ask the tester to confirm or correct before saving. "
                          + "\n\n".join(
@@ -116,19 +161,33 @@ def create_server(settings, transport=None):
                              .read_text(encoding="utf-8").split("---", 2)[2].strip()
                              for name in ("style-wardrobe-outfit", "read-wardrobe-receipts")
                          )
-                     ),
+                     )
+
+
+def create_server(settings, transport=None):
+    for url in (settings.resource, settings.issuer, settings.introspection):
+        if not url.startswith("https://"):
+            raise ValueError("Use HTTPS for OAuth endpoints.")
+    server = WardrobeServer("Virtual wardrobe", stateless_http=True, json_response=True,
+                     transport_security=TransportSecuritySettings(allowed_hosts=[urlsplit(settings.resource).netloc]),
+                     instructions=styling_instructions(),
                      token_verifier=Verifier(settings, transport),
                      auth=AuthSettings(issuer_url=AnyHttpUrl(settings.issuer),
                                        resource_server_url=AnyHttpUrl(settings.resource),
                                        required_scopes=["wardrobe"], validate_token_resource=True))
 
+    return register_tools(server, settings.database, settings.photo_hosts, owner, transport,
+                          {"securitySchemes": [{"type": "oauth2", "scopes": ["wardrobe"]}]})
+
+
+def register_tools(server, database, photo_hosts, owner, transport, auth_meta, photo_dir=None):
     def connect():
-        db = sqlite3.connect(settings.database)
+        db = sqlite3.connect(database)
         db.row_factory = sqlite3.Row
         return db
 
-    settings.database.touch(mode=0o600, exist_ok=True)
-    settings.database.chmod(0o600)
+    database.touch(mode=0o600, exist_ok=True)
+    database.chmod(0o600)
     with closing(connect()) as db, db:
         db.execute("""CREATE TABLE IF NOT EXISTS items (
             id TEXT PRIMARY KEY, owner TEXT NOT NULL, source TEXT NOT NULL,
@@ -143,7 +202,6 @@ def create_server(settings, transport=None):
             db.execute(f"DROP TABLE IF EXISTS {table}")
 
     fields = "id, category, colour, description"
-    auth_meta = {"securitySchemes": [{"type": "oauth2", "scopes": ["wardrobe"]}]}
 
     @server.tool(meta={**auth_meta, "openai/fileParams": ["photo"]})
     async def save_photo(photo: Upload, category: Category, colour: Label, description: Label,
@@ -163,7 +221,7 @@ def create_server(settings, transport=None):
                 raise ValueError("This photo already belongs to another wardrobe item.")
             return dict(existing)
         try:
-            data, mime = await download_photo(photo["download_url"], settings.photo_hosts, transport)
+            data, mime = await download_photo(photo["download_url"], photo_hosts, transport)
         except httpx.RequestError:
             raise ValueError("Photo download failed. Try uploading the photo again.") from None
         with closing(connect()) as db, db:
@@ -188,6 +246,21 @@ def create_server(settings, transport=None):
             return dict(db.execute(f"SELECT {fields} FROM items WHERE owner=? AND source=?",
                                    (user, photo["file_id"])).fetchone())
 
+    if photo_dir is not None:
+        @server.tool()
+        async def set_product_photo(item_id: str, image_url: str) -> dict:
+            """Save a verified matching merchant image for an existing local wardrobe item."""
+            hosts = {"venroy.com.au", "www.venroy.com.au", "cdn.shopify.com",
+                     "nudelucy.com.au", "www.nudelucy.com.au"}
+            data, mime = await download_photo(image_url, hosts, transport)
+            with closing(connect()) as db, db:
+                row = db.execute(f"""UPDATE items SET photo=?, mime=? WHERE owner=? AND id=?
+                                    RETURNING {fields}""",
+                                 (data, mime, owner(), item_id)).fetchone()
+                if row is None:
+                    raise ValueError("Wardrobe item unavailable.")
+                return dict(row)
+
     def item_content(item_id: str, for_outfit: bool) -> list[types.TextContent | types.ImageContent]:
         with closing(connect()) as db:
             row = db.execute(f"SELECT {fields}, photo, mime FROM items WHERE owner=? AND id=?",
@@ -198,6 +271,16 @@ def create_server(settings, transport=None):
             raise ValueError(f"Please identify {row['description']} with a short description or photo before styling it.")
         content = [types.TextContent(type="text", text=json.dumps({k: row[k] for k in fields.split(", ")}))]
         if row["photo"]:
+            if photo_dir is not None:
+                import hashlib
+                suffix = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[row["mime"]]
+                path = photo_dir / (hashlib.sha256(row["photo"]).hexdigest() + suffix)
+                if not path.exists():
+                    from tempfile import NamedTemporaryFile
+                    with NamedTemporaryFile(dir=photo_dir, delete=False) as tmp:
+                        tmp.write(row["photo"])
+                    os.replace(tmp.name, path)
+                content.append(types.TextContent(type="text", text=f"Display this saved photo: ![Wardrobe photo](<{path}>)"))
             content.append(types.ImageContent(type="image", mimeType=row["mime"],
                                               data=base64.b64encode(row["photo"]).decode()))
         return content
