@@ -12,7 +12,14 @@ def main():
     root = Path.home() / "Library" / "Application Support" / "Virtual Wardrobe Pilot"
     photos = root / "photos"
     photos.mkdir(parents=True, exist_ok=True, mode=0o700)
-    server = FastMCP("Virtual Wardrobe Pilot Local", instructions=styling_instructions())
+    server = FastMCP("Virtual Wardrobe Pilot Local", instructions=styling_instructions() + """
+When introducing the wardrobe, mention that the owner can remove a piece and restore it later.
+For removal or a return, call list_items with receipt_details=true to resolve the exact piece.
+For undo or restore, use status="removed" and receipt_details=true. Match the colour, size,
+receipt line and unit when available. If several pieces fit, show the distinguishing details
+and ask which one before changing anything. Use remove_item or restore_item with the selected
+ID. Confirm the piece and explain how to undo a removal. An outfit-only swap uses swap_outfit_item.
+""")
     register_tools(server, root / "wardrobe.sqlite3", {"files.oaiusercontent.com", "files.openai.com"},
                    lambda: "local", None, {}, photos)
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))

@@ -197,11 +197,29 @@ def register_tools(server, database, photo_hosts, owner, transport, auth_meta, p
         db.execute("""CREATE TABLE IF NOT EXISTS receipt_decisions (
             owner TEXT NOT NULL, merchant TEXT NOT NULL, receipt TEXT NOT NULL,
             line TEXT NOT NULL, item_id TEXT, PRIMARY KEY(owner, merchant, receipt, line))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS removed_items (
+            item_id TEXT PRIMARY KEY NOT NULL REFERENCES items(id))""")
+        db.execute("""CREATE VIEW IF NOT EXISTS active_items AS
+            SELECT items.*, items.rowid AS saved_order FROM items
+            WHERE id NOT IN (SELECT item_id FROM removed_items)""")
+        db.execute("""CREATE VIEW IF NOT EXISTS settled_receipt_lines AS
+            SELECT d.owner, d.merchant, d.receipt, d.line, a.id AS item_id
+            FROM receipt_decisions d LEFT JOIN active_items a
+            ON a.id=d.item_id AND a.owner=d.owner""")
         # Retire credentials issued by the previous direct Gmail integration.
         for table in ("gmail_links", "gmail_pairing", "gmail_accounts"):
             db.execute(f"DROP TABLE IF EXISTS {table}")
 
     fields = "id, category, colour, description"
+
+    def saved_upload(db, user, source):
+        row = db.execute(f"""SELECT {fields}, id IN (SELECT item_id FROM removed_items) AS removed
+                             FROM items WHERE owner=? AND source=?""", (user, source)).fetchone()
+        if row is None:
+            return None
+        if row["removed"]:
+            raise ValueError("This piece was removed. Restore it to use the saved photo.")
+        return {key: row[key] for key in fields.split(", ")}
 
     @server.tool(meta={**auth_meta, "openai/fileParams": ["photo"]})
     async def save_photo(photo: Upload, category: Category, colour: Label, description: Label,
@@ -209,10 +227,9 @@ def register_tools(server, database, photo_hosts, owner, transport, auth_meta, p
         """Save a confirmed garment photo. Pass existing_item_id when identifying a saved receipt item."""
         user = owner()
         with closing(connect()) as db:
-            existing = db.execute(f"SELECT {fields} FROM items WHERE owner=? AND source=?",
-                                  (user, photo["file_id"])).fetchone()
+            existing = saved_upload(db, user, photo["file_id"])
             if existing_item_id is not None:
-                target = db.execute("SELECT 1 FROM items WHERE owner=? AND id=?",
+                target = db.execute("SELECT 1 FROM active_items WHERE owner=? AND id=?",
                                     (user, existing_item_id)).fetchone()
                 if target is None:
                     raise ValueError("Wardrobe item unavailable.")
@@ -229,13 +246,14 @@ def register_tools(server, database, photo_hosts, owner, transport, auth_meta, p
                 try:
                     row = db.execute(f"""UPDATE items SET source=?, category=?, colour=?, description=?,
                                        photo=?, mime=? WHERE owner=? AND id=? AND length(photo)=0
+                                       AND id NOT IN (SELECT item_id FROM removed_items)
                                        RETURNING {fields}""",
                                      (photo["file_id"], category, colour, description, data, mime,
                                       user, existing_item_id)).fetchone()
                 except sqlite3.IntegrityError:
                     raise ValueError("This photo already belongs to another wardrobe item.") from None
                 if row is None:
-                    row = db.execute(f"SELECT {fields} FROM items WHERE owner=? AND id=? AND source=?",
+                    row = db.execute(f"SELECT {fields} FROM active_items WHERE owner=? AND id=? AND source=?",
                                      (user, existing_item_id, photo["file_id"])).fetchone()
                 if row is None:
                     raise ValueError("This wardrobe item already has a photo.")
@@ -243,8 +261,7 @@ def register_tools(server, database, photo_hosts, owner, transport, auth_meta, p
             db.execute("""INSERT INTO items VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(owner, source) DO NOTHING""",
                        (str(uuid4()), user, photo["file_id"], category, colour, description, data, mime))
-            return dict(db.execute(f"SELECT {fields} FROM items WHERE owner=? AND source=?",
-                                   (user, photo["file_id"])).fetchone())
+            return saved_upload(db, user, photo["file_id"])
 
     if photo_dir is not None:
         @server.tool()
@@ -255,6 +272,7 @@ def register_tools(server, database, photo_hosts, owner, transport, auth_meta, p
             data, mime = await download_photo(image_url, hosts, transport)
             with closing(connect()) as db, db:
                 row = db.execute(f"""UPDATE items SET photo=?, mime=? WHERE owner=? AND id=?
+                                    AND id NOT IN (SELECT item_id FROM removed_items)
                                     RETURNING {fields}""",
                                  (data, mime, owner(), item_id)).fetchone()
                 if row is None:
@@ -263,7 +281,7 @@ def register_tools(server, database, photo_hosts, owner, transport, auth_meta, p
 
     def item_content(item_id: str, for_outfit: bool) -> list[types.TextContent | types.ImageContent]:
         with closing(connect()) as db:
-            row = db.execute(f"SELECT {fields}, photo, mime FROM items WHERE owner=? AND id=?",
+            row = db.execute(f"SELECT {fields}, photo, mime FROM active_items WHERE owner=? AND id=?",
                              (owner(), item_id)).fetchone()
         if row is None:
             raise ValueError("Wardrobe item unavailable.")
@@ -294,7 +312,7 @@ def register_tools(server, database, photo_hosts, owner, transport, auth_meta, p
     def reviewed_receipt_lines(merchant: Label, receipt_ref: Label) -> list[dict]:
         """Look up settled line references before presenting an order for review."""
         with closing(connect()) as db:
-            rows = db.execute("""SELECT line, item_id FROM receipt_decisions
+            rows = db.execute("""SELECT line, item_id FROM settled_receipt_lines
                               WHERE owner=? AND merchant=? AND receipt=? ORDER BY line""",
                               (owner(), merchant.strip().casefold(), receipt_ref.strip().casefold()))
             return [{"line_ref": row["line"], "kept": row["item_id"] is not None,
@@ -304,12 +322,12 @@ def register_tools(server, database, photo_hosts, owner, transport, auth_meta, p
     def record_receipt_choice(merchant: Label, receipt_ref: Label, line_ref: Label,
                               kept: bool, description: Label | None = None,
                               category: Category | None = None, colour: Label | None = None) -> dict:
-        """Record an explicit keep or skip for one receipt unit. Replays return its original decision."""
+        """Record an explicit keep or skip for one receipt unit. Replays respect settled decisions and removed pieces."""
         user = owner()
         key = (user, merchant.strip().casefold(), receipt_ref.strip().casefold(), line_ref.strip().casefold())
         with closing(connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
-            existing = db.execute("""SELECT item_id FROM receipt_decisions
+            existing = db.execute("""SELECT item_id FROM settled_receipt_lines
                                   WHERE owner=? AND merchant=? AND receipt=? AND line=?""", key).fetchone()
             if existing:
                 item_id = existing["item_id"]
@@ -350,18 +368,62 @@ def register_tools(server, database, photo_hosts, owner, transport, auth_meta, p
         if item_ids.count(replace_id) != 1 or replacement_id in item_ids:
             raise ValueError("Select one current piece and a different wardrobe item.")
         with closing(connect()) as db:
-            existing = db.execute("SELECT 1 FROM items WHERE owner=? AND id=?",
+            existing = db.execute("SELECT 1 FROM active_items WHERE owner=? AND id=?",
                                   (owner(), replace_id)).fetchone()
         if existing is None:
             raise ValueError("Wardrobe item unavailable.")
         return show_outfit([replacement_id if item == replace_id else item for item in item_ids])
 
-    @server.tool(meta=auth_meta)
     def list_items() -> list[dict]:
-        """Find the signed-in tester's saved wardrobe items, including their IDs."""
+        """Find the signed-in tester's active wardrobe items, including their IDs."""
         with closing(connect()) as db:
             return [dict(row) for row in db.execute(
-                f"SELECT {fields} FROM items WHERE owner=? ORDER BY rowid", (owner(),))]
+                f"SELECT {fields} FROM active_items WHERE owner=? ORDER BY saved_order", (owner(),))]
+
+    if photo_dir is None:
+        server.tool(meta=auth_meta)(list_items)
+    else:
+        @server.tool(name="list_items", annotations=types.ToolAnnotations(readOnlyHint=True))
+        def list_local_items(status: Literal["active", "removed"] = "active",
+                             receipt_details: bool = False) -> list[dict]:
+            """List active or removed pieces. Request receipt details to distinguish variants and units."""
+            if status == "active" and not receipt_details:
+                return list_items()
+            # Include the original receipt unit even after an item gets a custom description or photo.
+            receipt_fields = ", d.merchant, d.receipt AS receipt_ref, d.line AS line_ref" if receipt_details else ""
+            receipt_join = ("LEFT JOIN receipt_decisions d ON d.owner=i.owner AND d.item_id=i.id"
+                            if receipt_details else "")
+            with closing(connect()) as db:
+                rows = db.execute(f"""SELECT i.id, i.category, i.colour, i.description{receipt_fields}
+                                      FROM items i {receipt_join}
+                                      WHERE i.owner=? AND (i.id IN (SELECT item_id FROM removed_items))=?
+                                      ORDER BY i.rowid""", (owner(), status == "removed"))
+                return [dict(row) for row in rows]
+
+        def change_membership(item_id, removed):
+            user = owner()
+            with closing(connect()) as db, db:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute(f"SELECT {fields} FROM items WHERE owner=? AND id=?",
+                                 (user, item_id)).fetchone()
+                if row is None:
+                    raise ValueError("Wardrobe item unavailable.")
+                if removed:
+                    db.execute("INSERT INTO removed_items (item_id) VALUES (?) ON CONFLICT DO NOTHING",
+                               (item_id,))
+                else:
+                    db.execute("DELETE FROM removed_items WHERE item_id=?", (item_id,))
+                return {**dict(row), "status": "removed" if removed else "active"}
+
+        @server.tool(annotations=types.ToolAnnotations(idempotentHint=True, openWorldHint=False))
+        def remove_item(item_id: str) -> dict:
+            """Remove one exact owned piece from the active wardrobe. Its photo is saved for restore."""
+            return change_membership(item_id, removed=True)
+
+        @server.tool(annotations=types.ToolAnnotations(idempotentHint=True, openWorldHint=False))
+        def restore_item(item_id: str) -> dict:
+            """Restore one removed piece to the active wardrobe with its original ID and photo."""
+            return change_membership(item_id, removed=False)
 
     @server.tool(meta=auth_meta)
     def correct_item(item_id: str, category: Category | None = None,
@@ -370,7 +432,8 @@ def register_tools(server, database, photo_hosts, owner, transport, auth_meta, p
         with closing(connect()) as db, db:
             row = db.execute(f"""UPDATE items SET category=coalesce(?, category),
                               colour=coalesce(?, colour), description=coalesce(?, description)
-                              WHERE owner=? AND id=? RETURNING {fields}""",
+                              WHERE owner=? AND id=? AND id NOT IN (SELECT item_id FROM removed_items)
+                              RETURNING {fields}""",
                              (category, colour, description, owner(), item_id)).fetchone()
             if row is None:
                 raise ValueError("Wardrobe item unavailable.")
